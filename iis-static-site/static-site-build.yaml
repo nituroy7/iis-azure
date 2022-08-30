@@ -1,0 +1,147 @@
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    exclude:
+    - README.md
+    - static-site-build.yaml
+    
+# This stage is for building the application
+stages:
+  - stage: 'build'
+    displayName: "Build"
+    jobs: 
+      - job: build_application
+        displayName: 'build app'
+        pool:
+          vmImage: 'windows-latest'
+        steps:
+          - task: CopyFiles@2
+            displayName: 'Copy Files to: $(Build.ArtifactStagingDirectory) '
+            inputs:
+              SourceFolder: '$(Build.SourcesDirectory)'
+              Contents: |
+                **/*
+                !.git/**/*
+                !static-site-build.yaml
+                !README.md
+                !.gitignore    
+              TargetFolder: '$(Build.ArtifactStagingDirectory)/iis-static-site'
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: 'drop'
+              publishLocation: 'Container' 
+
+# This stage is for deplying the application to development
+  - stage: 'deploy_development'
+    displayName: "Deploy To Development"
+    dependsOn: 'build'
+    condition: succeeded()
+    jobs:
+      - deployment: 'deploy_application'
+        displayName: 'deploy application'
+        environment: Development.vm-az-win-iis
+        pool:
+          vmImage: 'windows-latest'
+        variables:
+          - group: development
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current # downloading the latest app artifact from the previous stage
+                  artifact: drop
+                - task: WindowsMachineFileCopy@2
+                  displayName: 'Copy app files to remote windows VM'
+                  inputs:
+                    sourcePath: $(Pipeline.Workspace)/drop
+                    machineNames: $(machinenames)
+                    adminUserName: $(username)
+                    adminPassword: $(password) 
+                    targetPath: C:\inetpub\wwwroot
+
+# This stage is for smoke testing the application in development
+  - stage: 'postdeploy_development'
+    displayName: "Smoke Test Development"
+    jobs:
+    - job: smoketest
+      displayName: SmokeTest
+      pool:
+        vmImage: 'windows-latest'
+      variables:
+        - group: development
+      steps:
+      - task: oneluckidevWebSmokeTest@1
+        displayName: 'Testing development application'
+        inputs:
+          url: $(url)
+          expectedReturnCode: '200'
+          retryAttemptCount: '3'
+          strictSSL: true
+          retryDelay: '1000'
+            
+
+# This stage is for deplying the application to production
+  - stage: 'deploy_production'
+    displayName: "Deploy to Production"
+    variables:
+      - group: production
+    dependsOn: 'build'
+    condition: succeeded()
+    jobs:
+      - job: wait_for_validation
+        pool: server
+        displayName: Wait for external validation
+        timeoutInMinutes: 4320 # job times out in 3 days | configure using variable
+        steps:   
+          - task: ManualValidation@0
+            timeoutInMinutes: 1440 # task times out in 1 day | configure using variable
+            inputs:
+              notifyUsers: |
+                $(approver)
+              instructions: 'Please validate the build configuration and resume'
+              onTimeout: 'resume'
+      - deployment: 'deploy_application'
+        displayName: 'deploy application'
+        pool:
+          vmImage: 'windows-latest'
+        dependsOn: wait_for_validation
+        continueOnError: false
+        environment:  Development.vm-az-win-iis # TODO: Change to production environment
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current # downloading the app artifact from the previous stage
+                  artifact: drop
+                - task: WindowsMachineFileCopy@2
+                  displayName: 'Copy app files to remote windows VM'
+                  inputs:
+                    sourcePath: $(Pipeline.Workspace)/drop
+                    machineNames: $(machinenames)
+                    adminUserName: $(username)
+                    adminPassword: $(password) 
+                    targetPath: C:\inetpub\wwwroot
+
+# # This stage is for smoke testing the application in production
+  - stage: 'postdeploy_production'
+    displayName: "Smoke Test Development"
+    jobs:
+    - job: smoketest
+      displayName: SmokeTest
+      pool:
+        vmImage: 'windows-latest'
+      variables:
+        - group: production
+      steps:
+      - task: oneluckidevWebSmokeTest@1
+        displayName: 'Testing production application'
+        inputs:
+          url: $(url)
+          expectedReturnCode: '200'
+          retryAttemptCount: '3'
+          strictSSL: true
+          retryDelay: '1000'
+                  
